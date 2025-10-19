@@ -1,0 +1,17 @@
+{
+  "expo": {
+    "name": "EmCipher Mobile",
+    "slug": "emcipher-mobile",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "scheme": "emcipher",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.meownetstudios.emcipher",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Scan QR codes to join encrypted conversations."
+      }
+    }
+  }
+}
