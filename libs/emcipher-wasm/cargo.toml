@@ -1,0 +1,23 @@
+[package]
+name = "emcipher-wasm"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "WASM bindings for EmCipher crypto core"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+base64 = "0.22"
+# JS RNG for browsers
+getrandom = { version = "0.2", features = ["js"] }
+
+# use the core crate
+emcipher = { path = "../emcipher-rust" }
+chacha20poly1305 = "0.10"
+js-sys = "0.3"
+
+[profile.release]
+opt-level = "s"
