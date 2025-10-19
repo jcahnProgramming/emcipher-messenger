@@ -1,5 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Text, View, TextInput, Button, StyleSheet, FlatList, Alert } from 'react-native';
+import {
+  Text, View, TextInput, Button, StyleSheet, FlatList, Alert,
+  ScrollView, KeyboardAvoidingView, Platform
+} from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import * as SecureStore from 'expo-secure-store';
 import { StatusBar } from 'expo-status-bar';
@@ -14,37 +17,93 @@ type Route =
 export default function App() {
   const [route, setRoute] = useState<Route>({ name: 'Home' });
 
-  return (
-    <SafeAreaProvider>
-      {/* Make the iOS status bar area respected */}
-      <StatusBar style="dark" />
-      <SafeAreaView style={styles.safe} edges={['top', 'left', 'right', 'bottom']}>
-        {route.name === 'Home' && <HomeScreen goJoin={() => setRoute({ name: 'Join' })} />}
-        {route.name === 'Join' && (
+  const renderScreen = () => {
+    if (route.name === 'Home') {
+      return (
+        <>
+          <Header title="EmCipher Mobile" subtitle="Secure seed & conversation join" />
+          <HomeScreen goJoin={() => setRoute({ name: 'Join' })} />
+        </>
+      );
+    }
+    if (route.name === 'Join') {
+      return (
+        <>
+          <Header title="Join Conversation" subtitle="Paste QR JSON payload" onBack={() => setRoute({ name: 'Home' })} />
           <JoinScreen
             goBack={() => setRoute({ name: 'Home' })}
             goChat={(p) => setRoute({ name: 'Chat', ...p })}
           />
-        )}
-        {route.name === 'Chat' && (
-          <ChatScreen
-            convId={route.convId}
-            saltB64={route.saltB64}
-            profile={route.profile}
-            goBack={() => setRoute({ name: 'Home' })}
-          />
-        )}
+        </>
+      );
+    }
+    return (
+      <>
+        <Header title="Chat" subtitle="Relay demo (placeholder crypto)" onBack={() => setRoute({ name: 'Home' })} />
+        <ChatScreen
+          convId={route.convId}
+          saltB64={route.saltB64}
+          profile={route.profile}
+          goBack={() => setRoute({ name: 'Home' })}
+        />
+      </>
+    );
+  };
+
+  return (
+    <SafeAreaProvider>
+      <StatusBar style="dark" />
+      <SafeAreaView style={styles.safe} edges={['top', 'left', 'right', 'bottom']}>
+        {/* KeyboardAvoiding keeps inputs visible; ScrollView makes everything scrollable */}
+        <KeyboardAvoidingView
+          style={{ flex: 1 }}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          keyboardVerticalOffset={Platform.OS === 'ios' ? 8 : 0}
+        >
+          <ScrollView
+            style={{ flex: 1 }}
+            contentContainerStyle={styles.scrollContent}
+            keyboardShouldPersistTaps="handled"
+          >
+            {renderScreen()}
+          </ScrollView>
+        </KeyboardAvoidingView>
       </SafeAreaView>
     </SafeAreaProvider>
   );
 }
 
-// ---- storage (seed only) ----
+/* ---------------- UI atoms ---------------- */
+
+function Header({
+  title, subtitle, onBack
+}: { title: string; subtitle?: string; onBack?: () => void }) {
+  return (
+    <View style={styles.header}>
+      <View style={styles.headerRow}>
+        {onBack ? (
+          <View style={{ marginRight: 12 }}>
+            <Button title="Back" onPress={onBack} />
+          </View>
+        ) : <View style={{ width: 64 }} /> }
+        <View style={{ flex: 1 }}>
+          <Text style={styles.headerTitle}>{title}</Text>
+          {subtitle ? <Text style={styles.headerSubtitle}>{subtitle}</Text> : null}
+        </View>
+        <View style={{ width: 64 }} />
+      </View>
+    </View>
+  );
+}
+
+/* ---------------- storage (seed only) ---------------- */
+
 const KEY = 'emcipher.seed';
 async function setSeedSecure(s: string) { await SecureStore.setItemAsync(KEY, s); }
 async function getSeedSecure() { return SecureStore.getItemAsync(KEY); }
 
-// ---- placeholder crypto ----
+/* ---------------- placeholder crypto ---------------- */
+
 function deriveKm(seed: string, convId: string, _saltB64: string, _profile: 'desktop'|'mobile'): string {
   const blob = `${seed}#${convId}`;
   return Base64.fromUint8Array(new TextEncoder().encode(blob)).slice(0, 44);
@@ -65,7 +124,8 @@ function decryptB64(_kmsgB64: string, _nonce_b64: string, ct_b64: string, _aad: 
   return m ? m[1] : '(invalid placeholder ciphertext)';
 }
 
-// ---- relay client ----
+/* ---------------- relay client ---------------- */
+
 const RELAY_URL = 'http://10.0.0.155:3001'; // your Mac’s LAN IP
 type RelayMsg = { conv_id: string; msg_id: string; nonce_b64: string; aad: string; ciphertext: string; };
 
@@ -86,7 +146,8 @@ async function ackMessage(convId: string, msgId: string) {
   if (!res.ok) throw new Error(`ackMessage failed: ${res.status}`);
 }
 
-// ---- screens ----
+/* ---------------- screens ---------------- */
+
 function HomeScreen({ goJoin }: { goJoin: () => void }) {
   const [seed, setSeedState] = useState('');
   const [loaded, setLoaded] = useState<string | null>(null);
@@ -94,9 +155,7 @@ function HomeScreen({ goJoin }: { goJoin: () => void }) {
   useEffect(() => { (async () => { setLoaded(await getSeedSecure()); })(); }, []);
 
   return (
-    <View style={styles.wrap}>
-      <Text style={styles.title}>EmCipher Mobile</Text>
-
+    <View style={styles.card}>
       <Text style={styles.label}>Master Seed (SecureStore)</Text>
       <TextInput
         value={seed}
@@ -112,8 +171,8 @@ function HomeScreen({ goJoin }: { goJoin: () => void }) {
         setLoaded(await getSeedSecure());
         Alert.alert('Saved securely');
       }} />
-      <View style={{ height: 8 }} />
-      <Text>Loaded seed: {loaded ?? '(none)'} </Text>
+      <View style={{ height: 12 }} />
+      <Text style={styles.muted}>Loaded seed: {loaded ?? '(none)'} </Text>
 
       <View style={{ height: 24 }} />
       <Button title="Join Conversation (paste JSON)" onPress={goJoin} />
@@ -140,18 +199,16 @@ function JoinScreen({
   };
 
   return (
-    <View style={styles.wrap}>
-      <Text style={styles.title}>Join Conversation</Text>
-      <Text style={{ opacity: 0.7 }}>Paste JSON from the web app QR.</Text>
-      <View style={{ height: 12 }} />
+    <View style={styles.card}>
+      <Text style={styles.label}>Paste JSON from the web app QR</Text>
       <TextInput
         value={text}
         onChangeText={setText}
         placeholder='{"convId":"...","saltB64":"...","profile":"mobile"}'
         multiline={true}
-        style={[styles.input, { minHeight: 100 }]}
+        style={[styles.input, { minHeight: 120, textAlignVertical: 'top' }]}
       />
-      <View style={{ flexDirection: 'row', gap: 8 }}>
+      <View style={styles.row}>
         <Button title="Apply" onPress={handleApply} />
         <View style={{ width: 8 }} />
         <Button title="Back" onPress={goBack} />
@@ -223,31 +280,32 @@ function ChatScreen({
   };
 
   return (
-    <View style={styles.wrap}>
-      <Text style={styles.title}>Chat</Text>
-      <Text style={{ opacity: 0.7 }}>convId: <Text style={styles.mono}>{convId}</Text></Text>
-      <Text style={{ opacity: 0.7 }}>saltB64: <Text style={styles.mono}>{saltB64}</Text></Text>
-      <Text style={{ opacity: 0.7 }}>profile: <Text style={styles.mono}>{profile}</Text></Text>
+    <View style={styles.card}>
+      <Text style={styles.kv}>convId: <Text style={styles.mono}>{convId}</Text></Text>
+      <Text style={styles.kv}>saltB64: <Text style={styles.mono}>{saltB64}</Text></Text>
+      <Text style={styles.kv}>profile: <Text style={styles.mono}>{profile}</Text></Text>
 
-      <View style={{ height: 10 }} />
       <Text style={styles.label}>AAD</Text>
       <TextInput value={aad} onChangeText={setAad} style={styles.input} />
 
-      <View style={{ height: 10 }} />
       <Text style={styles.label}>Message</Text>
-      <TextInput value={input} onChangeText={setInput} style={styles.input} placeholder="Type..." />
+      <TextInput
+        value={input}
+        onChangeText={setInput}
+        style={styles.input}
+        placeholder="Type…"
+      />
 
-      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
+      <View style={styles.rowWrap}>
         <Button title="Encrypt + Send" onPress={doEncryptAndSend} />
         <Button title="Fetch Inbox" onPress={pollInboxOnce} />
         <Button title="Decrypt + ACK" onPress={decryptFirst} />
         <Button title="Back" onPress={goBack} />
       </View>
 
-      <View style={{ height: 16 }} />
-      <Text style={styles.label}>Event Log</Text>
+      <Text style={[styles.label, { marginTop: 12 }]}>Event Log</Text>
       <FlatList
-        style={{ flex: 1 }}
+        style={{ maxHeight: 240 }}
         data={log}
         keyExtractor={(i, idx) => idx.toString()}
         renderItem={({ item }) => <Text style={styles.mono}>{item}</Text>}
@@ -256,11 +314,44 @@ function ChatScreen({
   );
 }
 
+/* ---------------- styles ---------------- */
+
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: '#fff' },
-  wrap: { flex: 1, padding: 16, gap: 12 },
-  title: { fontSize: 22, fontWeight: '700' },
-  label: { opacity: 0.7 },
-  input: { borderWidth: 1, borderColor: '#ccc', borderRadius: 10, padding: 10 },
+  safe: { flex: 1, backgroundColor: '#f6f7fb' },
+  scrollContent: { paddingBottom: 24 },
+  header: {
+    paddingHorizontal: 16,
+    paddingTop: 4,
+    paddingBottom: 12,
+    backgroundColor: '#ffffff',
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#e8e8ef'
+  },
+  headerRow: { flexDirection: 'row', alignItems: 'center' },
+  headerTitle: { fontSize: 18, fontWeight: '700' },
+  headerSubtitle: { fontSize: 12, color: '#666', marginTop: 2 },
+  wrap: { padding: 16, gap: 12 },
+  card: {
+    margin: 16,
+    padding: 16,
+    borderRadius: 14,
+    backgroundColor: '#fff',
+    shadowColor: '#000',
+    shadowOpacity: 0.06,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: '#ececf3'
+  },
+  title: { fontSize: 20, fontWeight: '700', marginBottom: 4 },
+  label: { fontSize: 12, color: '#666' },
+  muted: { fontSize: 12, color: '#8a8a99' },
+  kv: { fontSize: 12, color: '#666', marginBottom: 4 },
+  input: {
+    borderWidth: 1, borderColor: '#d9d9e3', borderRadius: 10,
+    padding: 10, backgroundColor: '#fafbfe'
+  },
+  row: { flexDirection: 'row', alignItems: 'center' },
+  rowWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 8 },
   mono: { fontFamily: 'Menlo', fontSize: 12 }
 });
