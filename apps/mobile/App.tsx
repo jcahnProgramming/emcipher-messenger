@@ -1,14 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Text, View, TextInput, Button, StyleSheet, FlatList, Alert,
-  ScrollView, KeyboardAvoidingView, Platform
+  KeyboardAvoidingView, Platform, ScrollView
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import * as SecureStore from 'expo-secure-store';
 import { StatusBar } from 'expo-status-bar';
 import { Base64 } from 'js-base64';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import { CryptoBridge } from './src/crypto'; // <-- USE THE BRIDGE
+import { CryptoBridge } from './src/crypto'; // bridge (placeholder for now)
 
 /* ------------ tiny router ------------ */
 type Route =
@@ -61,13 +61,9 @@ export default function App() {
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
           keyboardVerticalOffset={Platform.OS === 'ios' ? 8 : 0}
         >
-          <ScrollView
-            style={{ flex: 1 }}
-            contentContainerStyle={styles.scrollContent}
-            keyboardShouldPersistTaps="handled"
-          >
-            {renderScreen()}
-          </ScrollView>
+          {/* IMPORTANT: No global ScrollView here.
+              Each screen manages its own scrolling to avoid nesting FlatList in ScrollView. */}
+          {renderScreen()}
         </KeyboardAvoidingView>
       </SafeAreaView>
     </SafeAreaProvider>
@@ -130,28 +126,30 @@ function HomeScreen({ goJoin }: { goJoin: () => void }) {
   useEffect(() => { (async () => { setLoaded(await getSeedSecure()); })(); }, []);
 
   return (
-    <View style={styles.card}>
-      <Text style={styles.label}>Master Seed (SecureStore)</Text>
-      <TextInput
-        value={seed}
-        onChangeText={setSeedState}
-        placeholder="Enter strong passphrase"
-        secureTextEntry={true}
-        style={styles.input}
-      />
-      <View style={{ height: 8 }} />
-      <Button title="Save Seed" onPress={async () => {
-        if (!seed) return Alert.alert('Seed required');
-        await setSeedSecure(seed);
-        setLoaded(await getSeedSecure());
-        Alert.alert('Saved securely');
-      }} />
-      <View style={{ height: 12 }} />
-      <Text style={styles.muted}>Loaded seed: {loaded ?? '(none)'} </Text>
+    <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
+      <View style={styles.card}>
+        <Text style={styles.label}>Master Seed (SecureStore)</Text>
+        <TextInput
+          value={seed}
+          onChangeText={setSeedState}
+          placeholder="Enter strong passphrase"
+          secureTextEntry={true}
+          style={styles.input}
+        />
+        <View style={{ height: 8 }} />
+        <Button title="Save Seed" onPress={async () => {
+          if (!seed) return Alert.alert('Seed required');
+          await setSeedSecure(seed);
+          setLoaded(await getSeedSecure());
+          Alert.alert('Saved securely');
+        }} />
+        <View style={{ height: 12 }} />
+        <Text style={styles.muted}>Loaded seed: {loaded ?? '(none)'} </Text>
 
-      <View style={{ height: 24 }} />
-      <Button title="Join Conversation (scan or paste)" onPress={goJoin} />
-    </View>
+        <View style={{ height: 24 }} />
+        <Button title="Join Conversation (scan or paste)" onPress={goJoin} />
+      </View>
+    </ScrollView>
   );
 }
 
@@ -189,48 +187,50 @@ function JoinScreen({
   };
 
   return (
-    <View style={styles.card}>
-      <Text style={styles.label}>Scan a QR from web, or paste JSON</Text>
+    <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
+      <View style={styles.card}>
+        <Text style={styles.label}>Scan a QR from web, or paste JSON</Text>
 
-      <View style={styles.row}>
-        <Button
-          title={scannerVisible ? 'Close Scanner' : 'Open Scanner'}
-          onPress={() => setScannerVisible(v => !v)}
-        />
-        <View style={{ width: 8 }} />
-        <Button title="Back" onPress={goBack} />
-      </View>
-
-      {scannerVisible && permission?.granted === true && (
-        <View style={styles.cameraBox}>
-          <CameraView
-            style={{ flex: 1 }}
-            facing="back"
-            active={true}
-            onBarcodeScanned={handleScan}
+        <View style={styles.row}>
+          <Button
+            title={scannerVisible ? 'Close Scanner' : 'Open Scanner'}
+            onPress={() => setScannerVisible(v => !v)}
           />
+          <View style={{ width: 8 }} />
+          <Button title="Back" onPress={goBack} />
         </View>
-      )}
 
-      {scannerVisible && permission && permission.granted === false && (
-        <View style={{ marginTop: 8 }}>
-          <Text>Camera permission not granted.</Text>
-          <View style={{ height: 8 }} />
-          <Button title="Grant Permission" onPress={requestPermission} />
-        </View>
-      )}
+        {scannerVisible && permission?.granted === true && (
+          <View style={styles.cameraBox}>
+            <CameraView
+              style={{ flex: 1 }}
+              facing="back"
+              active={true}
+              onBarcodeScanned={handleScan}
+            />
+          </View>
+        )}
 
-      <View style={{ height: 12 }} />
-      <TextInput
-        value={text}
-        onChangeText={setText}
-        placeholder='{"convId":"...","saltB64":"...","profile":"mobile"}'
-        multiline={true}
-        style={[styles.input, { minHeight: 120, textAlignVertical: 'top' }]}
-      />
-      <View style={{ height: 8 }} />
-      <Button title="Apply JSON" onPress={() => applyJSON(text)} />
-    </View>
+        {scannerVisible && permission && permission.granted === false && (
+          <View style={{ marginTop: 8 }}>
+            <Text>Camera permission not granted.</Text>
+            <View style={{ height: 8 }} />
+            <Button title="Grant Permission" onPress={requestPermission} />
+          </View>
+        )}
+
+        <View style={{ height: 12 }} />
+        <TextInput
+          value={text}
+          onChangeText={setText}
+          placeholder='{"convId":"...","saltB64":"...","profile":"mobile"}'
+          multiline={true}
+          style={[styles.input, { minHeight: 120, textAlignVertical: 'top' }]}
+        />
+        <View style={{ height: 8 }} />
+        <Button title="Apply JSON" onPress={() => applyJSON(text)} />
+      </View>
+    </ScrollView>
   );
 }
 
@@ -322,6 +322,7 @@ function ChatScreen({
       </View>
 
       <Text style={[styles.label, { marginTop: 12 }]}>Event Log</Text>
+      {/* FlatList is NOT nested inside a ScrollView anymore */}
       <FlatList
         style={{ maxHeight: 240 }}
         data={log}

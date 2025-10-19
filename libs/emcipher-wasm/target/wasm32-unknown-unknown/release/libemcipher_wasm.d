@@ -1,0 +1,1 @@
+/Users/jamie/emcipher-messenger/libs/emcipher-wasm/target/wasm32-unknown-unknown/release/libemcipher_wasm.rlib: /Users/jamie/emcipher-messenger/libs/emcipher-rust/src/lib.rs /Users/jamie/emcipher-messenger/libs/emcipher-wasm/src/lib.rs

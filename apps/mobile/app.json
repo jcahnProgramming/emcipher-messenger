@@ -12,6 +12,9 @@
       "infoPlist": {
         "NSCameraUsageDescription": "Scan QR codes to join encrypted conversations."
       }
-    }
+    },
+    "plugins": [
+      "expo-secure-store"
+    ]
   }
 }

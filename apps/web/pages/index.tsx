@@ -2,20 +2,20 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { Base64 } from "js-base64";
 import { v4 as uuidv4 } from "uuid";
-import { CryptoBridge } from "../src/crypto"; // <-- relative import, no alias
+import { CryptoBridge } from "../src/crypto"; // relative import to web bridge
 
 // Dynamically import QRCode to avoid SSR issues
 const QRCode = dynamic(() => import("qrcode.react").then(m => m.default || m), { ssr: false });
 
-// --- simple relay client (same contract used by mobile) ---
+// --- simple relay client ---
 const RELAY_URL = process.env.NEXT_PUBLIC_RELAY_URL || "http://localhost:3001";
 
 type RelayMsg = {
   conv_id: string;
   msg_id: string;
   nonce_b64: string;
-  aad: string;         // base64
-  ciphertext: string;  // base64
+  aad: string;
+  ciphertext: string;
 };
 
 async function postMessage(convId: string, msg: RelayMsg) {
@@ -69,6 +69,10 @@ export default function Home() {
   const [inbox, setInbox] = useState<RelayMsg[]>([]);
   const kmRef = useRef<string>("");
 
+  // status flags
+  const [wasmReady, setWasmReady] = useState(false);
+  const [kmDerived, setKmDerived] = useState(false);
+
   // init conv/salt on client only
   useEffect(() => {
     if (!convId) setConvId(uuidv4());
@@ -82,8 +86,17 @@ export default function Home() {
 
   useEffect(() => {
     (async () => {
-      await CryptoBridge.init(); // initialize WASM
-      pushLog("WASM initialized.");
+      try {
+        await CryptoBridge.init(); // initialize WASM
+        setWasmReady(true);
+        pushLog("✅ WASM initialized.");
+      } catch (err: any) {
+        setWasmReady(false);
+        pushLog(`❌ WASM init failed: ${err?.message ?? String(err)}`);
+        // Also surface to console for devs
+        // eslint-disable-next-line no-console
+        console.error("WASM init error:", err);
+      }
     })();
   }, []);
 
@@ -91,49 +104,85 @@ export default function Home() {
     setLog((prev) => [`${new Date().toLocaleTimeString()} ${m}`, ...prev]);
 
   const deriveKm = () => {
-    if (!seed) return pushLog("❌ Seed required");
-    if (!convId || !saltB64) return pushLog("❌ ConvId/salt not ready");
-    kmRef.current = CryptoBridge.deriveKm(seed, convId, saltB64, profile);
-    pushLog("🔑 Derived KM.");
+    try {
+      if (!seed) {
+        pushLog("❌ Seed required (enter a seed above).");
+        return;
+      }
+      if (!convId || !saltB64) {
+        pushLog("❌ ConvId/salt not ready yet (wait a moment).");
+        return;
+      }
+      if (!wasmReady) {
+        pushLog("⏳ WASM not ready yet.");
+        return;
+      }
+      kmRef.current = CryptoBridge.deriveKm(seed, convId, saltB64, profile);
+      setKmDerived(true);
+      pushLog("🔑 Derived KM.");
+    } catch (err: any) {
+      setKmDerived(false);
+      pushLog(`❌ Derive KM error: ${err?.message ?? String(err)}`);
+      // eslint-disable-next-line no-console
+      console.error("deriveKm error:", err);
+    }
   };
 
   const doEncryptAndSend = async () => {
-    if (!kmRef.current) return pushLog("❌ Derive KM first");
-    if (!input) return pushLog("❌ Enter a message");
+    try {
+      if (!kmRef.current) return pushLog("❌ Derive KM first");
+      if (!input) return pushLog("❌ Enter a message");
 
-    const kmsg = CryptoBridge.deriveMsgKeyBase64(kmRef.current, counter);
-    const { nonce_b64, ct_b64 } = CryptoBridge.encryptB64(kmsg, input, aad);
+      const kmsg = CryptoBridge.deriveMsgKeyBase64(kmRef.current, counter);
+      const { nonce_b64, ct_b64 } = CryptoBridge.encryptB64(kmsg, input, aad);
 
-    const msg: RelayMsg = {
-      conv_id: convId,
-      msg_id: uuidv4(),
-      nonce_b64,
-      aad: Base64.fromUint8Array(new TextEncoder().encode(aad)),
-      ciphertext: ct_b64,
-    };
-    await postMessage(convId, msg);
-    pushLog(`➡️ sent: ${input}`);
-    setInput("");
-    setCounter((c) => c + 1);
+      const msg: RelayMsg = {
+        conv_id: convId,
+        msg_id: uuidv4(),
+        nonce_b64,
+        aad: Base64.fromUint8Array(new TextEncoder().encode(aad)),
+        ciphertext: ct_b64,
+      };
+      await postMessage(convId, msg);
+      pushLog(`➡️ sent: ${input}`);
+      setInput("");
+      setCounter((c) => c + 1);
+    } catch (err: any) {
+      pushLog(`❌ Send error: ${err?.message ?? String(err)}`);
+      // eslint-disable-next-line no-console
+      console.error("send error:", err);
+    }
   };
 
   const pollInboxOnce = async () => {
-    const list = await fetchMessages(convId);
-    setInbox(list);
-    pushLog(`⬅️ fetched ${list.length} message(s)`);
+    try {
+      const list = await fetchMessages(convId);
+      setInbox(list);
+      pushLog(`⬅️ fetched ${list.length} message(s)`);
+    } catch (err: any) {
+      pushLog(`❌ Fetch error: ${err?.message ?? String(err)}`);
+      // eslint-disable-next-line no-console
+      console.error("fetch error:", err);
+    }
   };
 
   const decryptFirst = async () => {
-    if (!kmRef.current) return pushLog("❌ Derive KM first");
-    if (!inbox.length) return pushLog("📭 Inbox empty");
-    const m = inbox[0];
-    const kmsg = CryptoBridge.deriveMsgKeyBase64(kmRef.current, counter);
-    const aadUtf8 = new TextDecoder().decode(Base64.toUint8Array(m.aad));
-    const pt = CryptoBridge.decryptB64(kmsg, m.nonce_b64, m.ciphertext, aadUtf8);
-    pushLog(`🔓 decrypted: ${pt}`);
-    await ackMessage(convId, m.msg_id);
-    pushLog(`✅ ACKed ${m.msg_id}`);
-    setInbox(inbox.slice(1));
+    try {
+      if (!kmRef.current) return pushLog("❌ Derive KM first");
+      if (!inbox.length) return pushLog("📭 Inbox empty");
+      const m = inbox[0];
+      const kmsg = CryptoBridge.deriveMsgKeyBase64(kmRef.current, counter);
+      const aadUtf8 = new TextDecoder().decode(Base64.toUint8Array(m.aad));
+      const pt = CryptoBridge.decryptB64(kmsg, m.nonce_b64, m.ciphertext, aadUtf8);
+      pushLog(`🔓 decrypted: ${pt}`);
+      await ackMessage(convId, m.msg_id);
+      pushLog(`✅ ACKed ${m.msg_id}`);
+      setInbox(inbox.slice(1));
+    } catch (err: any) {
+      pushLog(`❌ Decrypt error: ${err?.message ?? String(err)}`);
+      // eslint-disable-next-line no-console
+      console.error("decrypt error:", err);
+    }
   };
 
   const regenerateConv = () => {
@@ -141,16 +190,24 @@ export default function Home() {
     setSaltB64(random16B64());
     setCounter(1);
     kmRef.current = "";
+    setKmDerived(false);
     pushLog("♻️ New conv & salt generated. Re-derive KM.");
   };
+
+  const deriveDisabled = !wasmReady || !seed || !convId || !saltB64;
 
   return (
     <div style={styles.page}>
       <div style={styles.card}>
         <h2 style={{ margin: 0 }}>EmCipher Web (WASM)</h2>
         <p style={{ opacity: 0.7, marginTop: 6 }}>
-          This page uses Rust/WASM for crypto via the shared bridge.
+          Uses Rust/WASM via the shared crypto bridge.
         </p>
+
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", margin: "8px 0" }}>
+          <Badge label={`WASM: ${wasmReady ? "ready" : "loading…"}`} ok={wasmReady} />
+          <Badge label={`KM: ${kmDerived ? "derived" : "not derived"}`} ok={kmDerived} />
+        </div>
 
         <div style={styles.row}>
           <label style={styles.label}>Seed</label>
@@ -175,7 +232,9 @@ export default function Home() {
         </div>
 
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
-          <button onClick={deriveKm} disabled={!convId || !saltB64}>Derive KM</button>
+          <button onClick={deriveKm} disabled={deriveDisabled}>
+            {deriveDisabled ? "Derive KM (fill seed + wait)" : "Derive KM"}
+          </button>
           <button onClick={regenerateConv}>Regenerate conv/salt</button>
         </div>
       </div>
@@ -183,7 +242,7 @@ export default function Home() {
       <div style={styles.card}>
         <h3 style={{ marginTop: 0 }}>Join from Mobile</h3>
         <p className="muted" style={{ marginTop: 4 }}>
-          Scan this QR in the mobile app (Join → Open Scanner) or paste JSON.
+          Scan this QR (Join → Open Scanner) or paste JSON in the mobile app.
         </p>
 
         <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap", marginTop: 12 }}>
@@ -228,7 +287,26 @@ export default function Home() {
   );
 }
 
-// --- inline styles (keep simple) ---
+/* --- tiny Badge component --- */
+function Badge({ label, ok }: { label: string; ok: boolean }) {
+  return (
+    <span
+      style={{
+        display: "inline-block",
+        fontSize: 12,
+        padding: "4px 8px",
+        borderRadius: 999,
+        background: ok ? "#e7f8ef" : "#fff6e1",
+        border: `1px solid ${ok ? "#b9ebd0" : "#ffe0a3"}`,
+        color: ok ? "#0f7a42" : "#9a6a00",
+      }}
+    >
+      {label}
+    </span>
+  );
+}
+
+// --- inline styles ---
 const styles: Record<string, React.CSSProperties> = {
   page: {
     maxWidth: 1000,
