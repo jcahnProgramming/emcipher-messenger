@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Text, View, TextInput, Button, StyleSheet, FlatList, Alert } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import * as SecureStore from 'expo-secure-store';
+import { StatusBar } from 'expo-status-bar';
 import { Base64 } from 'js-base64';
 
 // ---- tiny router ----
@@ -13,18 +14,29 @@ type Route =
 export default function App() {
   const [route, setRoute] = useState<Route>({ name: 'Home' });
 
-  if (route.name === 'Home') {
-    return <HomeScreen goJoin={() => setRoute({ name: 'Join' })} />;
-  }
-  if (route.name === 'Join') {
-    return (
-      <JoinScreen
-        goBack={() => setRoute({ name: 'Home' })}
-        goChat={(p) => setRoute({ name: 'Chat', ...p })}
-      />
-    );
-  }
-  return <ChatScreen convId={route.convId} saltB64={route.saltB64} profile={route.profile} goBack={() => setRoute({ name: 'Home' })} />;
+  return (
+    <SafeAreaProvider>
+      {/* Make the iOS status bar area respected */}
+      <StatusBar style="dark" />
+      <SafeAreaView style={styles.safe} edges={['top', 'left', 'right', 'bottom']}>
+        {route.name === 'Home' && <HomeScreen goJoin={() => setRoute({ name: 'Join' })} />}
+        {route.name === 'Join' && (
+          <JoinScreen
+            goBack={() => setRoute({ name: 'Home' })}
+            goChat={(p) => setRoute({ name: 'Chat', ...p })}
+          />
+        )}
+        {route.name === 'Chat' && (
+          <ChatScreen
+            convId={route.convId}
+            saltB64={route.saltB64}
+            profile={route.profile}
+            goBack={() => setRoute({ name: 'Home' })}
+          />
+        )}
+      </SafeAreaView>
+    </SafeAreaProvider>
+  );
 }
 
 // ---- storage (seed only) ----
@@ -32,7 +44,7 @@ const KEY = 'emcipher.seed';
 async function setSeedSecure(s: string) { await SecureStore.setItemAsync(KEY, s); }
 async function getSeedSecure() { return SecureStore.getItemAsync(KEY); }
 
-// ---- placeholder crypto (matches web/mobile placeholder) ----
+// ---- placeholder crypto ----
 function deriveKm(seed: string, convId: string, _saltB64: string, _profile: 'desktop'|'mobile'): string {
   const blob = `${seed}#${convId}`;
   return Base64.fromUint8Array(new TextEncoder().encode(blob)).slice(0, 44);
@@ -82,8 +94,8 @@ function HomeScreen({ goJoin }: { goJoin: () => void }) {
   useEffect(() => { (async () => { setLoaded(await getSeedSecure()); })(); }, []);
 
   return (
-    <SafeAreaView style={styles.wrap}>
-      <Text style={styles.title}>EmCipher Mobile (no-nav mode)</Text>
+    <View style={styles.wrap}>
+      <Text style={styles.title}>EmCipher Mobile</Text>
 
       <Text style={styles.label}>Master Seed (SecureStore)</Text>
       <TextInput
@@ -101,11 +113,11 @@ function HomeScreen({ goJoin }: { goJoin: () => void }) {
         Alert.alert('Saved securely');
       }} />
       <View style={{ height: 8 }} />
-      <Text>Loaded seed: {loaded ?? '(none)'}</Text>
+      <Text>Loaded seed: {loaded ?? '(none)'} </Text>
 
       <View style={{ height: 24 }} />
       <Button title="Join Conversation (paste JSON)" onPress={goJoin} />
-    </SafeAreaView>
+    </View>
   );
 }
 
@@ -128,7 +140,7 @@ function JoinScreen({
   };
 
   return (
-    <SafeAreaView style={styles.wrap}>
+    <View style={styles.wrap}>
       <Text style={styles.title}>Join Conversation</Text>
       <Text style={{ opacity: 0.7 }}>Paste JSON from the web app QR.</Text>
       <View style={{ height: 12 }} />
@@ -144,7 +156,7 @@ function JoinScreen({
         <View style={{ width: 8 }} />
         <Button title="Back" onPress={goBack} />
       </View>
-    </SafeAreaView>
+    </View>
   );
 }
 
@@ -180,7 +192,7 @@ function ChatScreen({
     const { nonce_b64, ct_b64 } = encryptB64(kmsg, input, aad);
     const msg: RelayMsg = {
       conv_id: convId,
-      msg_id: `${Date.now()}`, // simple id for now
+      msg_id: `${Date.now()}`,
       nonce_b64,
       aad: Base64.fromUint8Array(new TextEncoder().encode(aad)),
       ciphertext: ct_b64
@@ -211,7 +223,7 @@ function ChatScreen({
   };
 
   return (
-    <SafeAreaView style={styles.wrap}>
+    <View style={styles.wrap}>
       <Text style={styles.title}>Chat</Text>
       <Text style={{ opacity: 0.7 }}>convId: <Text style={styles.mono}>{convId}</Text></Text>
       <Text style={{ opacity: 0.7 }}>saltB64: <Text style={styles.mono}>{saltB64}</Text></Text>
@@ -240,12 +252,13 @@ function ChatScreen({
         keyExtractor={(i, idx) => idx.toString()}
         renderItem={({ item }) => <Text style={styles.mono}>{item}</Text>}
       />
-    </SafeAreaView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  wrap: { flex: 1, padding: 16, gap: 12, backgroundColor: '#fff' },
+  safe: { flex: 1, backgroundColor: '#fff' },
+  wrap: { flex: 1, padding: 16, gap: 12 },
   title: { fontSize: 22, fontWeight: '700' },
   label: { opacity: 0.7 },
   input: { borderWidth: 1, borderColor: '#ccc', borderRadius: 10, padding: 10 },
