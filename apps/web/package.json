@@ -9,10 +9,13 @@
     "wasm": "cd ../../libs/emcipher-wasm && wasm-pack build --release --target web --out-dir ../../apps/web/public/wasm/emcipher --out-name emcipher_wasm"
   },
   "dependencies": {
+    "@types/uuid": "^10.0.0",
+    "js-base64": "^3.7.8",
     "next": "14.2.33",
-    "qrcode.react": "^3.1.0",
+    "qrcode.react": "^3.2.0",
     "react": "18.3.1",
-    "react-dom": "18.3.1"
+    "react-dom": "18.3.1",
+    "uuid": "^13.0.0"
   },
   "devDependencies": {
     "@types/node": "22.7.5",

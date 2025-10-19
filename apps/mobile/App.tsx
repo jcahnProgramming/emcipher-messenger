@@ -8,6 +8,7 @@ import * as SecureStore from 'expo-secure-store';
 import { StatusBar } from 'expo-status-bar';
 import { Base64 } from 'js-base64';
 import { CameraView, useCameraPermissions } from 'expo-camera';
+import { CryptoBridge } from './src/crypto'; // <-- USE THE BRIDGE
 
 /* ------------ tiny router ------------ */
 type Route =
@@ -40,7 +41,7 @@ export default function App() {
     }
     return (
       <>
-        <Header title="Chat" subtitle="Relay demo (placeholder crypto)" onBack={() => setRoute({ name: 'Home' })} />
+        <Header title="Chat" subtitle="Relay demo (crypto bridge)" onBack={() => setRoute({ name: 'Home' })} />
         <ChatScreen
           convId={route.convId}
           saltB64={route.saltB64}
@@ -99,27 +100,6 @@ function Header({
 const KEY = 'emcipher.seed';
 async function setSeedSecure(s: string) { await SecureStore.setItemAsync(KEY, s); }
 async function getSeedSecure() { return SecureStore.getItemAsync(KEY); }
-
-/* ------------ placeholder crypto ------------ */
-function deriveKm(seed: string, convId: string, _saltB64: string, _profile: 'desktop'|'mobile'): string {
-  const blob = `${seed}#${convId}`;
-  return Base64.fromUint8Array(new TextEncoder().encode(blob)).slice(0, 44);
-}
-function deriveMsgKeyBase64(kmB64: string, counter: number): string {
-  return Base64.fromUint8Array(new TextEncoder().encode(`${kmB64}:${counter}`));
-}
-function encryptB64(_kmsgB64: string, plaintext: string, aad: string) {
-  const nonce = Math.random().toString(36).slice(2);
-  return {
-    nonce_b64: Base64.fromUint8Array(new TextEncoder().encode(nonce)),
-    ct_b64: Base64.fromUint8Array(new TextEncoder().encode(`PT:${plaintext}|AAD:${aad}`))
-  };
-}
-function decryptB64(_kmsgB64: string, _nonce_b64: string, ct_b64: string, _aad: string) {
-  const dec = new TextDecoder().decode(Base64.toUint8Array(ct_b64));
-  const m = dec.match(/^PT:(.*)\|AAD:/);
-  return m ? m[1] : '(invalid placeholder ciphertext)';
-}
 
 /* ------------ relay client ------------ */
 const RELAY_URL = 'http://10.0.0.155:3001'; // your Mac’s LAN IP
@@ -186,12 +166,9 @@ function JoinScreen({
   const [permission, requestPermission] = useCameraPermissions();
 
   useEffect(() => {
-    // lazy request when opening scanner
-    (async () => {
-      if (scannerVisible && (!permission || permission.granted === false)) {
-        await requestPermission();
-      }
-    })();
+    if (scannerVisible && (!permission || permission.granted === false)) {
+      requestPermission();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scannerVisible]);
 
@@ -199,14 +176,14 @@ function JoinScreen({
     try {
       const parsed = JSON.parse(json) as { convId?: string; saltB64?: string; profile?: 'desktop'|'mobile' };
       if (!parsed?.convId || !parsed?.saltB64 || !parsed?.profile) throw new Error('Invalid payload');
-      goChat({ convId: parsed.convId, saltB64: parsed.saltB64, profile: parsed.profile });
+      goChat({ convId: parsed.convId, saltB64: parsed.saltB64, profile: parsed.profile as 'desktop'|'mobile' });
     } catch (e: any) {
       Alert.alert('Invalid JSON', e?.message ?? String(e));
     }
   };
 
   const handleScan = ({ data }: { data: string }) => {
-    setScannerVisible(false); // close camera immediately to avoid double-fires
+    setScannerVisible(false);
     setText(data);
     applyJSON(data);
   };
@@ -215,7 +192,6 @@ function JoinScreen({
     <View style={styles.card}>
       <Text style={styles.label}>Scan a QR from web, or paste JSON</Text>
 
-      {/* Scanner toggle */}
       <View style={styles.row}>
         <Button
           title={scannerVisible ? 'Close Scanner' : 'Open Scanner'}
@@ -225,13 +201,11 @@ function JoinScreen({
         <Button title="Back" onPress={goBack} />
       </View>
 
-      {/* Minimal, safe CameraView */}
       {scannerVisible && permission?.granted === true && (
         <View style={styles.cameraBox}>
           <CameraView
             style={{ flex: 1 }}
             facing="back"
-            /* critical: pass real booleans, not strings */
             active={true}
             onBarcodeScanned={handleScan}
           />
@@ -274,10 +248,11 @@ function ChatScreen({
 
   useEffect(() => {
     (async () => {
+      await CryptoBridge.init(); // bridge init (no-op on mobile placeholder for now)
       const s = await getSeedSecure();
       if (s) {
-        kmRef.current = deriveKm(s, convId, saltB64, profile);
-        pushLog('🔑 Derived KM (placeholder).');
+        kmRef.current = CryptoBridge.deriveKm(s, convId, saltB64, profile);
+        pushLog('🔑 Derived KM (bridge).');
       } else {
         pushLog('❌ No seed found — set it on Home first.');
       }
@@ -288,8 +263,8 @@ function ChatScreen({
 
   const doEncryptAndSend = async () => {
     if (!kmRef.current) { pushLog('❌ No KM — set seed.'); return; }
-    const kmsg = deriveMsgKeyBase64(kmRef.current, counter);
-    const { nonce_b64, ct_b64 } = encryptB64(kmsg, input, aad);
+    const kmsg = CryptoBridge.deriveMsgKeyBase64(kmRef.current, counter);
+    const { nonce_b64, ct_b64 } = CryptoBridge.encryptB64(kmsg, input, aad);
     const msg: RelayMsg = {
       conv_id: convId,
       msg_id: `${Date.now()}`,
@@ -313,9 +288,9 @@ function ChatScreen({
     if (!kmRef.current) { pushLog('❌ No KM — set seed.'); return; }
     if (!inbox.length) { pushLog('📭 Inbox empty'); return; }
     const m = inbox[0];
-    const kmsg = deriveMsgKeyBase64(kmRef.current, counter);
+    const kmsg = CryptoBridge.deriveMsgKeyBase64(kmRef.current, counter);
     const aadUtf8 = new TextDecoder().decode(Base64.toUint8Array(m.aad));
-    const pt = decryptB64(kmsg, m.nonce_b64, m.ciphertext, aadUtf8);
+    const pt = CryptoBridge.decryptB64(kmsg, m.nonce_b64, m.ciphertext, aadUtf8);
     pushLog(`🔓 decrypted: ${pt}`);
     await ackMessage(convId, m.msg_id);
     pushLog(`✅ ACKed ${m.msg_id}`);

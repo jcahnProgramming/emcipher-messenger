@@ -1,394 +1,273 @@
-import { useEffect, useRef, useState } from "react";
-import { QRCodeCanvas } from "qrcode.react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import dynamic from "next/dynamic";
+import { Base64 } from "js-base64";
+import { v4 as uuidv4 } from "uuid";
+import { CryptoBridge } from "../src/crypto"; // <-- relative import, no alias
 
-type Wasm = {
-  default?: (input?: RequestInfo | URL | Response | BufferSource | WebAssembly.Module) => Promise<any>;
-  derive_master_key_b64(
-    seed: string,
-    salt_b64: string,
-    conv_id: string,
-    profile: string
-  ): string;
-  derive_message_key_b64(km_b64: string, counter: number): string;
-  encrypt_aead_b64(
-    k_b64: string,
-    pt: string,
-    aad: string
-  ): { nonce_b64: string; ct_b64: string };
-  decrypt_aead_b64(
-    k_b64: string,
-    nonce_b64: string,
-    ct_b64: string,
-    aad: string
-  ): string;
+// Dynamically import QRCode to avoid SSR issues
+const QRCode = dynamic(() => import("qrcode.react").then(m => m.default || m), { ssr: false });
+
+// --- simple relay client (same contract used by mobile) ---
+const RELAY_URL = process.env.NEXT_PUBLIC_RELAY_URL || "http://localhost:3001";
+
+type RelayMsg = {
+  conv_id: string;
+  msg_id: string;
+  nonce_b64: string;
+  aad: string;         // base64
+  ciphertext: string;  // base64
 };
 
-type JoinPayload = {
-  convId: string;
-  saltB64: string;
-  profile: "desktop" | "mobile";
-};
+async function postMessage(convId: string, msg: RelayMsg) {
+  const res = await fetch(`${RELAY_URL}/v1/conversations/${encodeURIComponent(convId)}/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(msg),
+  });
+  if (!res.ok) throw new Error(`postMessage failed: ${res.status}`);
+}
+
+async function fetchMessages(convId: string): Promise<RelayMsg[]> {
+  const res = await fetch(`${RELAY_URL}/v1/conversations/${encodeURIComponent(convId)}/messages`);
+  if (!res.ok) throw new Error(`fetchMessages failed: ${res.status}`);
+  const js = await res.json();
+  return js?.msgs ?? [];
+}
+
+async function ackMessage(convId: string, msgId: string) {
+  const res = await fetch(
+    `${RELAY_URL}/v1/conversations/${encodeURIComponent(convId)}/messages/${encodeURIComponent(msgId)}/ack`,
+    { method: "POST" }
+  );
+  if (!res.ok) throw new Error(`ackMessage failed: ${res.status}`);
+}
+
+// safe random 16 bytes on client
+function random16B64(): string {
+  if (typeof window !== "undefined" && window.crypto?.getRandomValues) {
+    const u = new Uint8Array(16);
+    window.crypto.getRandomValues(u);
+    return Base64.fromUint8Array(u);
+  }
+  const u = new Uint8Array(16);
+  for (let i = 0; i < 16; i++) u[i] = Math.floor(Math.random() * 256);
+  return Base64.fromUint8Array(u);
+}
 
 export default function Home() {
-  const wasmRef = useRef<Wasm | null>(null);
-  const [ready, setReady] = useState(false);
+  // conversation bootstrap (initialized in useEffect for SSR-safety)
+  const [seed, setSeed] = useState("");
+  const [convId, setConvId] = useState<string>("");
+  const [saltB64, setSaltB64] = useState<string>("");
+  const profile = "desktop" as const;
 
-  // crypto params
-  const [seed, setSeed] = useState("correct horse battery staple");
-  const [convId, setConvId] = useState("demo-conv-uuid");
-  const [saltB64, setSaltB64] = useState(() =>
-    btoa(String.fromCharCode(...Array(16).fill(7)))
+  // crypto / message state
+  const [aad, setAad] = useState("v=1");
+  const [counter, setCounter] = useState(1);
+  const [input, setInput] = useState("");
+  const [log, setLog] = useState<string[]>([]);
+  const [inbox, setInbox] = useState<RelayMsg[]>([]);
+  const kmRef = useRef<string>("");
+
+  // init conv/salt on client only
+  useEffect(() => {
+    if (!convId) setConvId(uuidv4());
+    if (!saltB64) setSaltB64(random16B64());
+  }, [convId, saltB64]);
+
+  const joinPayload = useMemo(
+    () => (convId && saltB64 ? { convId, saltB64, profile: "mobile" as const } : null),
+    [convId, saltB64]
   );
-  const [profile, setProfile] = useState<"desktop" | "mobile">("desktop");
-  const [counter, setCounter] = useState<number>(1);
-  const [aad, setAad] = useState("conv=demo;msg=1;v=1");
 
-  // derived keys
-  const [kmB64, setKmB64] = useState("");
-  const [kmsgB64, setKmsgB64] = useState("");
-
-  // message state
-  const [message, setMessage] = useState("Hello from the browser!");
-  const [nonceB64, setNonceB64] = useState("");
-  const [ctB64, setCtB64] = useState("");
-  const [ptOut, setPtOut] = useState("");
-
-  // relay tracking
-  const [postedMsgId, setPostedMsgId] = useState<string>("");
-  const [fetchedMsgId, setFetchedMsgId] = useState<string>("");
-
-  // ui
-  const [status, setStatus] = useState("");
-  const [joinPaste, setJoinPaste] = useState(""); // paste QR JSON here
-  const joinObj: JoinPayload = { convId, saltB64, profile };
-
-  // Load WASM glue JS from /public using a URL import (bypasses webpack)
   useEffect(() => {
     (async () => {
-      try {
-        // 👇 webpackIgnore tells Next not to bundle this; it's served from /public
-        const mod = (await import(
-          /* webpackIgnore: true */ "/wasm/emcipher/emcipher_wasm.js"
-        )) as unknown as Wasm;
-
-        // For wasm-pack --target web, call init with the .wasm URL explicitly
-        if (typeof mod.default === "function") {
-          await mod.default("/wasm/emcipher/emcipher_wasm_bg.wasm");
-        }
-
-        wasmRef.current = mod as Wasm;
-        setReady(true);
-      } catch (e) {
-        console.error(e);
-        setStatus("Failed to load WASM. From apps/web run: npm run wasm");
-      }
+      await CryptoBridge.init(); // initialize WASM
+      pushLog("WASM initialized.");
     })();
   }, []);
 
-  // --- crypto helpers ---
+  const pushLog = (m: string) =>
+    setLog((prev) => [`${new Date().toLocaleTimeString()} ${m}`, ...prev]);
 
-  const derive = () => {
-    if (!wasmRef.current) return;
-    const km = wasmRef.current!.derive_master_key_b64(
-      seed,
-      saltB64,
-      convId,
-      profile
-    );
-    setKmB64(km);
-    const kmsg = wasmRef.current!.derive_message_key_b64(km, counter);
-    setKmsgB64(kmsg);
-    setStatus("Derived KM + per-message key.");
+  const deriveKm = () => {
+    if (!seed) return pushLog("❌ Seed required");
+    if (!convId || !saltB64) return pushLog("❌ ConvId/salt not ready");
+    kmRef.current = CryptoBridge.deriveKm(seed, convId, saltB64, profile);
+    pushLog("🔑 Derived KM.");
   };
 
-  const encrypt = () => {
-    if (!wasmRef.current) return;
-    const { nonce_b64, ct_b64 } = wasmRef.current!.encrypt_aead_b64(
-      kmsgB64,
-      message,
-      aad
-    );
-    setNonceB64(nonce_b64);
-    setCtB64(ct_b64);
-    setStatus("Encrypted.");
-  };
+  const doEncryptAndSend = async () => {
+    if (!kmRef.current) return pushLog("❌ Derive KM first");
+    if (!input) return pushLog("❌ Enter a message");
 
-  const decrypt = async () => {
-    if (!wasmRef.current) return;
-    const pt = wasmRef.current!.decrypt_aead_b64(
-      kmsgB64,
-      nonceB64,
-      ctB64,
-      aad
-    );
-    setPtOut(pt);
-    setStatus("Decrypted.");
+    const kmsg = CryptoBridge.deriveMsgKeyBase64(kmRef.current, counter);
+    const { nonce_b64, ct_b64 } = CryptoBridge.encryptB64(kmsg, input, aad);
 
-    if (fetchedMsgId) {
-      setStatus("Decrypted. Sending ACK…");
-      await ackMessage(fetchedMsgId);
-      setFetchedMsgId("");
-      setStatus("ACK sent (deleted from relay).");
-    }
-  };
-
-  // --- relay helpers ---
-
-  const postToRelay = async () => {
-    if (!nonceB64 || !ctB64) {
-      setStatus("Encrypt first before posting.");
-      return;
-    }
-    setStatus("Posting to relay…");
-    const msgId = `${Date.now()}`; // TODO: switch to UUID
-    const body = {
+    const msg: RelayMsg = {
       conv_id: convId,
-      msg_id: msgId,
-      nonce_b64: nonceB64,
-      aad: btoa(aad),
-      ciphertext: ctB64,
+      msg_id: uuidv4(),
+      nonce_b64,
+      aad: Base64.fromUint8Array(new TextEncoder().encode(aad)),
+      ciphertext: ct_b64,
     };
-    await fetch(
-      `http://localhost:3001/v1/conversations/${encodeURIComponent(
-        convId
-      )}/messages`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      }
-    );
-    setPostedMsgId(msgId);
-    setStatus(`Posted msg_id=${msgId}`);
+    await postMessage(convId, msg);
+    pushLog(`➡️ sent: ${input}`);
+    setInput("");
+    setCounter((c) => c + 1);
   };
 
-  const fetchFromRelay = async () => {
-    setStatus("Fetching from relay…");
-    const res = await fetch(
-      `http://localhost:3001/v1/conversations/${encodeURIComponent(
-        convId
-      )}/messages`
-    );
-    const data = await res.json();
-    const list = (data?.msgs ?? []) as Array<{
-      conv_id: string;
-      msg_id: string;
-      nonce_b64: string;
-      aad: string; // base64
-      ciphertext: string;
-    }>;
-    setStatus(`Fetched ${list.length} message(s).`);
-
-    if (list.length) {
-      const m = list[0];
-      setFetchedMsgId(m.msg_id);
-      setCtB64(m.ciphertext);
-      setNonceB64(m.nonce_b64);
-      setAad(atob(m.aad));
-      setStatus(`Loaded msg_id=${m.msg_id}. Click Decrypt to view and ACK.`);
-    }
+  const pollInboxOnce = async () => {
+    const list = await fetchMessages(convId);
+    setInbox(list);
+    pushLog(`⬅️ fetched ${list.length} message(s)`);
   };
 
-  const ackMessage = async (msgId: string) => {
-    await fetch(
-      `http://localhost:3001/v1/conversations/${encodeURIComponent(
-        convId
-      )}/messages/${encodeURIComponent(msgId)}/ack`,
-      { method: "POST" }
-    );
+  const decryptFirst = async () => {
+    if (!kmRef.current) return pushLog("❌ Derive KM first");
+    if (!inbox.length) return pushLog("📭 Inbox empty");
+    const m = inbox[0];
+    const kmsg = CryptoBridge.deriveMsgKeyBase64(kmRef.current, counter);
+    const aadUtf8 = new TextDecoder().decode(Base64.toUint8Array(m.aad));
+    const pt = CryptoBridge.decryptB64(kmsg, m.nonce_b64, m.ciphertext, aadUtf8);
+    pushLog(`🔓 decrypted: ${pt}`);
+    await ackMessage(convId, m.msg_id);
+    pushLog(`✅ ACKed ${m.msg_id}`);
+    setInbox(inbox.slice(1));
   };
 
-  // --- QR helpers ---
-
-  const applyJoinJson = () => {
-    try {
-      const parsed = JSON.parse(joinPaste) as JoinPayload;
-      if (!parsed?.convId || !parsed?.saltB64 || !parsed?.profile) {
-        setStatus("Invalid join JSON.");
-        return;
-      }
-      setConvId(parsed.convId);
-      setSaltB64(parsed.saltB64);
-      setProfile(parsed.profile);
-      setStatus("Applied join payload.");
-    } catch (e) {
-      console.error(e);
-      setStatus("Invalid JSON.");
-    }
+  const regenerateConv = () => {
+    setConvId(uuidv4());
+    setSaltB64(random16B64());
+    setCounter(1);
+    kmRef.current = "";
+    pushLog("♻️ New conv & salt generated. Re-derive KM.");
   };
-
-  // --- ui ---
 
   return (
-    <main style={{ maxWidth: 920, margin: "40px auto", fontFamily: "ui-sans-serif" }}>
-      <h1>EmCipher Browser Playground</h1>
-      <p style={{ opacity: 0.8 }}>
-        Ensure relay is on <code>localhost:3001</code> and you ran{" "}
-        <code>npm run wasm</code> from <code>apps/web</code>.
-      </p>
-      <p>
-        <b>Status:</b> {ready ? "WASM ready. " : "Loading WASM… "} {status}
-      </p>
+    <div style={styles.page}>
+      <div style={styles.card}>
+        <h2 style={{ margin: 0 }}>EmCipher Web (WASM)</h2>
+        <p style={{ opacity: 0.7, marginTop: 6 }}>
+          This page uses Rust/WASM for crypto via the shared bridge.
+        </p>
 
-      <section style={{ display: "grid", gap: 12, marginTop: 24 }}>
-        <label>
-          Seed
-          <br />
+        <div style={styles.row}>
+          <label style={styles.label}>Seed</label>
           <input
+            type="password"
             value={seed}
             onChange={(e) => setSeed(e.target.value)}
-            style={{ width: "100%" }}
+            placeholder="Enter strong passphrase"
+            style={styles.input}
           />
-        </label>
-        <label>
-          Conversation ID
-          <br />
-          <input
-            value={convId}
-            onChange={(e) => setConvId(e.target.value)}
-            style={{ width: "100%" }}
-          />
-        </label>
-        <label>
-          Salt (base64, 16 bytes)
-          <br />
-          <input
-            value={saltB64}
-            onChange={(e) => setSaltB64(e.target.value)}
-            style={{ width: "100%" }}
-          />
-        </label>
-        <label>
-          Profile&nbsp;
-          <select
-            value={profile}
-            onChange={(e) => setProfile(e.target.value as "desktop" | "mobile")}
-          >
-            <option value="desktop">desktop</option>
-            <option value="mobile">mobile</option>
-          </select>
-        </label>
-        <label>
-          Message Counter
-          <br />
-          <input
-            type="number"
-            value={counter}
-            onChange={(e) =>
-              setCounter(parseInt(e.target.value || "0", 10))
-            }
-          />
-        </label>
-        <label>
-          AAD
-          <br />
-          <input
-            value={aad}
-            onChange={(e) => setAad(e.target.value)}
-            style={{ width: "100%" }}
-          />
-        </label>
-        <label>
-          Message
-          <br />
-          <textarea
-            value={message}
-            onChange={(e) => setMessage(e.target.value)}
-            style={{ width: "100%" }}
-            rows={3}
-          />
-        </label>
-      </section>
+        </div>
 
-      <div style={{ display: "flex", gap: 8, marginTop: 16, flexWrap: "wrap" }}>
-        <button onClick={derive}>1) Derive keys</button>
-        <button onClick={encrypt}>2) Encrypt</button>
-        <button onClick={postToRelay}>3) POST → Relay</button>
-        <button onClick={fetchFromRelay}>4) Fetch</button>
-        <button onClick={decrypt}>5) Decrypt + ACK</button>
+        <div style={styles.rowWrap}>
+          <div style={{ flex: 1, minWidth: 280 }}>
+            <label style={styles.label}>convId</label>
+            <div style={styles.kv}>{convId || "(generating…)"}</div>
+          </div>
+          <div style={{ flex: 1, minWidth: 280 }}>
+            <label style={styles.label}>saltB64</label>
+            <div style={styles.kv}>{saltB64 || "(generating…)"}</div>
+          </div>
+        </div>
+
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+          <button onClick={deriveKm} disabled={!convId || !saltB64}>Derive KM</button>
+          <button onClick={regenerateConv}>Regenerate conv/salt</button>
+        </div>
       </div>
 
-      <section style={{ marginTop: 24 }}>
-        <h3>Derived</h3>
-        <div>
-          KM (b64): <code style={{ wordBreak: "break-all" }}>{kmB64}</code>
-        </div>
-        <div>
-          K_msg (b64):{" "}
-          <code style={{ wordBreak: "break-all" }}>{kmsgB64}</code>
-        </div>
-        <div>
-          Nonce (b64):{" "}
-          <code style={{ wordBreak: "break-all" }}>{nonceB64}</code>
-        </div>
-        <div>
-          Ciphertext (b64):{" "}
-          <code style={{ wordBreak: "break-all" }}>{ctB64}</code>
-        </div>
-        <div>
-          Decrypted plaintext: <code>{ptOut}</code>
-        </div>
-        <div>
-          Posted msg_id: <code>{postedMsgId || "—"}</code>
-        </div>
-        <div>
-          Fetched msg_id (to ACK): <code>{fetchedMsgId || "—"}</code>
-        </div>
-      </section>
-
-      <section style={{ marginTop: 32, display: "grid", gap: 16 }}>
-        <h3>Share / Join Conversation</h3>
-        <div style={{ display: "flex", gap: 24, alignItems: "center", flexWrap: "wrap" }}>
-          <div>
-            <p style={{ margin: 0, opacity: 0.7 }}>Share this QR to join:</p>
-            <QRCodeCanvas
-              value={JSON.stringify(joinObj)}
-              size={180}
-              includeMargin
-            />
-            <div>
-              <small>
-                {JSON.stringify(joinObj)}
-              </small>
-            </div>
-          </div>
-          <div style={{ flex: 1, minWidth: 260 }}>
-            <p style={{ margin: 0, opacity: 0.7 }}>Paste QR JSON to join:</p>
-            <textarea
-              value={joinPaste}
-              onChange={(e) => setJoinPaste(e.target.value)}
-              placeholder='{"convId":"...","saltB64":"...","profile":"desktop"}'
-              rows={6}
-              style={{ width: "100%" }}
-            />
-            <div style={{ marginTop: 8 }}>
-              <button onClick={applyJoinJson}>Apply</button>
-            </div>
-          </div>
-        </div>
-        <p style={{ opacity: 0.7 }}>
-          Note: The <code>seed</code> is never shared via QR. Both parties must enter the same seed manually.
+      <div style={styles.card}>
+        <h3 style={{ marginTop: 0 }}>Join from Mobile</h3>
+        <p className="muted" style={{ marginTop: 4 }}>
+          Scan this QR in the mobile app (Join → Open Scanner) or paste JSON.
         </p>
-      </section>
 
-      <style jsx>{`
-        input,
-        textarea,
-        select,
-        button {
-          padding: 8px;
-          border: 1px solid #ccc;
-          border-radius: 8px;
-        }
-        button {
-          cursor: pointer;
-        }
-        code {
-          background: #f5f5f5;
-          padding: 2px 4px;
-          border-radius: 6px;
-        }
-      `}</style>
-    </main>
+        <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap", marginTop: 12 }}>
+          <div>
+            {joinPayload ? <QRCode value={JSON.stringify(joinPayload)} size={160} /> : <div>Generating…</div>}
+          </div>
+          <pre style={styles.pre}>{JSON.stringify(joinPayload, null, 2)}</pre>
+        </div>
+      </div>
+
+      <div style={styles.card}>
+        <h3 style={{ marginTop: 0 }}>Encrypt / Relay / Decrypt</h3>
+
+        <div style={styles.row}>
+          <label style={styles.label}>AAD</label>
+          <input value={aad} onChange={(e) => setAad(e.target.value)} style={styles.input} />
+        </div>
+
+        <div style={styles.row}>
+          <label style={styles.label}>Message</label>
+          <input value={input} onChange={(e) => setInput(e.target.value)} style={styles.input} placeholder="Type…" />
+        </div>
+
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+          <button onClick={doEncryptAndSend}>Encrypt + Send</button>
+          <button onClick={pollInboxOnce}>Fetch Inbox</button>
+          <button onClick={decryptFirst}>Decrypt + ACK</button>
+        </div>
+      </div>
+
+      <div style={styles.card}>
+        <h3 style={{ marginTop: 0 }}>Event Log</h3>
+        <ul style={{ marginTop: 8 }}>
+          {log.map((l, i) => (
+            <li key={i} style={{ fontFamily: "Menlo, monospace", fontSize: 12 }}>
+              {l}
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
   );
 }
+
+// --- inline styles (keep simple) ---
+const styles: Record<string, React.CSSProperties> = {
+  page: {
+    maxWidth: 1000,
+    margin: "24px auto",
+    padding: "0 16px",
+    display: "grid",
+    gap: 16,
+  },
+  card: {
+    padding: 16,
+    borderRadius: 12,
+    background: "#fff",
+    border: "1px solid #ececf3",
+    boxShadow: "0 6px 20px rgba(0,0,0,0.03)",
+  },
+  row: { display: "grid", gridTemplateColumns: "120px 1fr", gap: 8, alignItems: "center", marginTop: 8 },
+  rowWrap: { display: "flex", gap: 16, flexWrap: "wrap", marginTop: 8 },
+  label: { fontSize: 12, color: "#666" },
+  input: {
+    border: "1px solid #d9d9e3",
+    borderRadius: 8,
+    padding: "8px 10px",
+    background: "#fafbfe",
+  },
+  kv: {
+    fontFamily: "Menlo, monospace",
+    fontSize: 12,
+    border: "1px dashed #e2e2ea",
+    borderRadius: 8,
+    padding: "8px 10px",
+    background: "#fbfbff",
+    wordBreak: "break-all",
+  },
+  pre: {
+    margin: 0,
+    padding: 8,
+    border: "1px dashed #e2e2ea",
+    borderRadius: 8,
+    background: "#fbfbff",
+    fontSize: 12,
+  },
+};
