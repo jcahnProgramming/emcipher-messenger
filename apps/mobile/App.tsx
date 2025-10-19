@@ -7,8 +7,9 @@ import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import * as SecureStore from 'expo-secure-store';
 import { StatusBar } from 'expo-status-bar';
 import { Base64 } from 'js-base64';
+import { CameraView, useCameraPermissions } from 'expo-camera';
 
-// ---- tiny router ----
+/* ------------ tiny router ------------ */
 type Route =
   | { name: 'Home' }
   | { name: 'Join' }
@@ -29,7 +30,7 @@ export default function App() {
     if (route.name === 'Join') {
       return (
         <>
-          <Header title="Join Conversation" subtitle="Paste QR JSON payload" onBack={() => setRoute({ name: 'Home' })} />
+          <Header title="Join Conversation" subtitle="Scan QR or paste JSON" onBack={() => setRoute({ name: 'Home' })} />
           <JoinScreen
             goBack={() => setRoute({ name: 'Home' })}
             goChat={(p) => setRoute({ name: 'Chat', ...p })}
@@ -54,7 +55,6 @@ export default function App() {
     <SafeAreaProvider>
       <StatusBar style="dark" />
       <SafeAreaView style={styles.safe} edges={['top', 'left', 'right', 'bottom']}>
-        {/* KeyboardAvoiding keeps inputs visible; ScrollView makes everything scrollable */}
         <KeyboardAvoidingView
           style={{ flex: 1 }}
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
@@ -73,8 +73,7 @@ export default function App() {
   );
 }
 
-/* ---------------- UI atoms ---------------- */
-
+/* ------------ UI atoms ------------ */
 function Header({
   title, subtitle, onBack
 }: { title: string; subtitle?: string; onBack?: () => void }) {
@@ -96,14 +95,12 @@ function Header({
   );
 }
 
-/* ---------------- storage (seed only) ---------------- */
-
+/* ------------ storage (seed only) ------------ */
 const KEY = 'emcipher.seed';
 async function setSeedSecure(s: string) { await SecureStore.setItemAsync(KEY, s); }
 async function getSeedSecure() { return SecureStore.getItemAsync(KEY); }
 
-/* ---------------- placeholder crypto ---------------- */
-
+/* ------------ placeholder crypto ------------ */
 function deriveKm(seed: string, convId: string, _saltB64: string, _profile: 'desktop'|'mobile'): string {
   const blob = `${seed}#${convId}`;
   return Base64.fromUint8Array(new TextEncoder().encode(blob)).slice(0, 44);
@@ -124,8 +121,7 @@ function decryptB64(_kmsgB64: string, _nonce_b64: string, ct_b64: string, _aad: 
   return m ? m[1] : '(invalid placeholder ciphertext)';
 }
 
-/* ---------------- relay client ---------------- */
-
+/* ------------ relay client ------------ */
 const RELAY_URL = 'http://10.0.0.155:3001'; // your Mac’s LAN IP
 type RelayMsg = { conv_id: string; msg_id: string; nonce_b64: string; aad: string; ciphertext: string; };
 
@@ -146,8 +142,7 @@ async function ackMessage(convId: string, msgId: string) {
   if (!res.ok) throw new Error(`ackMessage failed: ${res.status}`);
 }
 
-/* ---------------- screens ---------------- */
-
+/* ------------ screens ------------ */
 function HomeScreen({ goJoin }: { goJoin: () => void }) {
   const [seed, setSeedState] = useState('');
   const [loaded, setLoaded] = useState<string | null>(null);
@@ -175,7 +170,7 @@ function HomeScreen({ goJoin }: { goJoin: () => void }) {
       <Text style={styles.muted}>Loaded seed: {loaded ?? '(none)'} </Text>
 
       <View style={{ height: 24 }} />
-      <Button title="Join Conversation (paste JSON)" onPress={goJoin} />
+      <Button title="Join Conversation (scan or paste)" onPress={goJoin} />
     </View>
   );
 }
@@ -187,10 +182,22 @@ function JoinScreen({
   goChat: (p: { convId: string; saltB64: string; profile: 'desktop'|'mobile' }) => void;
 }) {
   const [text, setText] = useState('');
+  const [scannerVisible, setScannerVisible] = useState<boolean>(false);
+  const [permission, requestPermission] = useCameraPermissions();
 
-  const handleApply = () => {
+  useEffect(() => {
+    // lazy request when opening scanner
+    (async () => {
+      if (scannerVisible && (!permission || permission.granted === false)) {
+        await requestPermission();
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scannerVisible]);
+
+  const applyJSON = (json: string) => {
     try {
-      const parsed = JSON.parse(text) as { convId?: string; saltB64?: string; profile?: 'desktop'|'mobile' };
+      const parsed = JSON.parse(json) as { convId?: string; saltB64?: string; profile?: 'desktop'|'mobile' };
       if (!parsed?.convId || !parsed?.saltB64 || !parsed?.profile) throw new Error('Invalid payload');
       goChat({ convId: parsed.convId, saltB64: parsed.saltB64, profile: parsed.profile });
     } catch (e: any) {
@@ -198,9 +205,48 @@ function JoinScreen({
     }
   };
 
+  const handleScan = ({ data }: { data: string }) => {
+    setScannerVisible(false); // close camera immediately to avoid double-fires
+    setText(data);
+    applyJSON(data);
+  };
+
   return (
     <View style={styles.card}>
-      <Text style={styles.label}>Paste JSON from the web app QR</Text>
+      <Text style={styles.label}>Scan a QR from web, or paste JSON</Text>
+
+      {/* Scanner toggle */}
+      <View style={styles.row}>
+        <Button
+          title={scannerVisible ? 'Close Scanner' : 'Open Scanner'}
+          onPress={() => setScannerVisible(v => !v)}
+        />
+        <View style={{ width: 8 }} />
+        <Button title="Back" onPress={goBack} />
+      </View>
+
+      {/* Minimal, safe CameraView */}
+      {scannerVisible && permission?.granted === true && (
+        <View style={styles.cameraBox}>
+          <CameraView
+            style={{ flex: 1 }}
+            facing="back"
+            /* critical: pass real booleans, not strings */
+            active={true}
+            onBarcodeScanned={handleScan}
+          />
+        </View>
+      )}
+
+      {scannerVisible && permission && permission.granted === false && (
+        <View style={{ marginTop: 8 }}>
+          <Text>Camera permission not granted.</Text>
+          <View style={{ height: 8 }} />
+          <Button title="Grant Permission" onPress={requestPermission} />
+        </View>
+      )}
+
+      <View style={{ height: 12 }} />
       <TextInput
         value={text}
         onChangeText={setText}
@@ -208,11 +254,8 @@ function JoinScreen({
         multiline={true}
         style={[styles.input, { minHeight: 120, textAlignVertical: 'top' }]}
       />
-      <View style={styles.row}>
-        <Button title="Apply" onPress={handleApply} />
-        <View style={{ width: 8 }} />
-        <Button title="Back" onPress={goBack} />
-      </View>
+      <View style={{ height: 8 }} />
+      <Button title="Apply JSON" onPress={() => applyJSON(text)} />
     </View>
   );
 }
@@ -314,8 +357,7 @@ function ChatScreen({
   );
 }
 
-/* ---------------- styles ---------------- */
-
+/* ------------ styles ------------ */
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: '#f6f7fb' },
   scrollContent: { paddingBottom: 24 },
@@ -330,7 +372,6 @@ const styles = StyleSheet.create({
   headerRow: { flexDirection: 'row', alignItems: 'center' },
   headerTitle: { fontSize: 18, fontWeight: '700' },
   headerSubtitle: { fontSize: 12, color: '#666', marginTop: 2 },
-  wrap: { padding: 16, gap: 12 },
   card: {
     margin: 16,
     padding: 16,
@@ -343,7 +384,6 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: '#ececf3'
   },
-  title: { fontSize: 20, fontWeight: '700', marginBottom: 4 },
   label: { fontSize: 12, color: '#666' },
   muted: { fontSize: 12, color: '#8a8a99' },
   kv: { fontSize: 12, color: '#666', marginBottom: 4 },
@@ -351,7 +391,11 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: '#d9d9e3', borderRadius: 10,
     padding: 10, backgroundColor: '#fafbfe'
   },
-  row: { flexDirection: 'row', alignItems: 'center' },
+  row: { flexDirection: 'row', alignItems: 'center', marginTop: 8 },
   rowWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 8 },
+  cameraBox: {
+    height: 260, marginTop: 12, borderRadius: 14, overflow: 'hidden',
+    borderWidth: StyleSheet.hairlineWidth, borderColor: '#ddd'
+  },
   mono: { fontFamily: 'Menlo', fontSize: 12 }
 });
