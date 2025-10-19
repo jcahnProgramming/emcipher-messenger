@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { QRCodeCanvas } from "qrcode.react";
 
 type Wasm = {
   default?: (input?: RequestInfo | URL | Response | BufferSource | WebAssembly.Module) => Promise<any>;
@@ -20,6 +21,12 @@ type Wasm = {
     ct_b64: string,
     aad: string
   ): string;
+};
+
+type JoinPayload = {
+  convId: string;
+  saltB64: string;
+  profile: "desktop" | "mobile";
 };
 
 export default function Home() {
@@ -52,6 +59,8 @@ export default function Home() {
 
   // ui
   const [status, setStatus] = useState("");
+  const [joinPaste, setJoinPaste] = useState(""); // paste QR JSON here
+  const joinObj: JoinPayload = { convId, saltB64, profile };
 
   // Load WASM glue JS from /public using a URL import (bypasses webpack)
   useEffect(() => {
@@ -189,10 +198,29 @@ export default function Home() {
     );
   };
 
+  // --- QR helpers ---
+
+  const applyJoinJson = () => {
+    try {
+      const parsed = JSON.parse(joinPaste) as JoinPayload;
+      if (!parsed?.convId || !parsed?.saltB64 || !parsed?.profile) {
+        setStatus("Invalid join JSON.");
+        return;
+      }
+      setConvId(parsed.convId);
+      setSaltB64(parsed.saltB64);
+      setProfile(parsed.profile);
+      setStatus("Applied join payload.");
+    } catch (e) {
+      console.error(e);
+      setStatus("Invalid JSON.");
+    }
+  };
+
   // --- ui ---
 
   return (
-    <main style={{ maxWidth: 820, margin: "40px auto", fontFamily: "ui-sans-serif" }}>
+    <main style={{ maxWidth: 920, margin: "40px auto", fontFamily: "ui-sans-serif" }}>
       <h1>EmCipher Browser Playground</h1>
       <p style={{ opacity: 0.8 }}>
         Ensure relay is on <code>localhost:3001</code> and you ran{" "}
@@ -280,7 +308,7 @@ export default function Home() {
         <button onClick={decrypt}>5) Decrypt + ACK</button>
       </div>
 
-      <section style={{ marginTop: 20 }}>
+      <section style={{ marginTop: 24 }}>
         <h3>Derived</h3>
         <div>
           KM (b64): <code style={{ wordBreak: "break-all" }}>{kmB64}</code>
@@ -306,6 +334,41 @@ export default function Home() {
         <div>
           Fetched msg_id (to ACK): <code>{fetchedMsgId || "—"}</code>
         </div>
+      </section>
+
+      <section style={{ marginTop: 32, display: "grid", gap: 16 }}>
+        <h3>Share / Join Conversation</h3>
+        <div style={{ display: "flex", gap: 24, alignItems: "center", flexWrap: "wrap" }}>
+          <div>
+            <p style={{ margin: 0, opacity: 0.7 }}>Share this QR to join:</p>
+            <QRCodeCanvas
+              value={JSON.stringify(joinObj)}
+              size={180}
+              includeMargin
+            />
+            <div>
+              <small>
+                {JSON.stringify(joinObj)}
+              </small>
+            </div>
+          </div>
+          <div style={{ flex: 1, minWidth: 260 }}>
+            <p style={{ margin: 0, opacity: 0.7 }}>Paste QR JSON to join:</p>
+            <textarea
+              value={joinPaste}
+              onChange={(e) => setJoinPaste(e.target.value)}
+              placeholder='{"convId":"...","saltB64":"...","profile":"desktop"}'
+              rows={6}
+              style={{ width: "100%" }}
+            />
+            <div style={{ marginTop: 8 }}>
+              <button onClick={applyJoinJson}>Apply</button>
+            </div>
+          </div>
+        </div>
+        <p style={{ opacity: 0.7 }}>
+          Note: The <code>seed</code> is never shared via QR. Both parties must enter the same seed manually.
+        </p>
       </section>
 
       <style jsx>{`
